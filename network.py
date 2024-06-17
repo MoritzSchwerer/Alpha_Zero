@@ -7,7 +7,7 @@ from typing import Tuple
 
 def conv2d(in_channels: int, out_channels: int, bias: bool = False):
     return nn.Conv2d(
-        in_channels, out_channels, kernel_size=(3, 3), stride=1, bias=bias, padding=1
+        in_channels=in_channels, out_channels=out_channels, kernel_size=(3, 3), stride=(1,1), bias=bias, padding=(1,1)
     )
 
 
