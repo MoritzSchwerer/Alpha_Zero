@@ -70,10 +70,10 @@ class AlphaZeroConfig:
     def __init__(self, new_game_fn):
 
         self.new_game = new_game_fn
-        self.self_play_batch_size = 32
+        self.self_play_batch_size = 8
 
         # game settings
-        self.max_moves = 30
+        self.max_moves = 100
         self.action_space_size = 4672
 
         # exploration
