@@ -8,7 +8,7 @@ from typing import Tuple, List, Any
 from tqdm import tqdm
 
 from network import PredictionNetwork
-from game import GameHistory
+from game import GameHistory, new_game
 from config import AlphaZeroConfig
 from mcts import Node, expand_node
 
@@ -53,17 +53,6 @@ def select_child(config: AlphaZeroConfig, node: Node):
         for action, child in node.children.items()
     )
     return action, child
-
-
-def select_child_gumbel(config: AlphaZeroConfig, node: Node):
-    visits = np.array([child.visit_count for child in node.children.values()])
-    prior = np.array([child.prior for child in node.children.values()])
-    actions = [a for a in node.children.keys()]
-    total_visits = np.sum(visits)
-    preference = prior - (visits / (total_visits + 1))
-    action_index = np.argmax(preference).item()
-    action = actions[action_index]
-    return action, node.children[action]
 
 
 def ucb_score(config: AlphaZeroConfig, parent: Node, child: Node) -> float:
@@ -183,7 +172,7 @@ def play_game(
         ).half()
 
     # start_game = time.time_ns()
-    games = [config.new_game() for _ in range(config.self_play_batch_size)]
+    games = [new_game() for _ in range(config.self_play_batch_size)]
     # game_time += time.time_ns() - start_game
 
     histories = [

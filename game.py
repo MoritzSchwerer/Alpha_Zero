@@ -1,5 +1,6 @@
 import copy
 import numpy as np
+import random
 
 from pettingzoo.classic import chess_v6
 from typing import Optional, Tuple
@@ -22,8 +23,7 @@ class Chess(chess_v6.raw_env):
 
 
 class GameHistory:
-    def __init__(self, create_func):
-        self.new_game = create_func
+    def __init__(self):
         self.actions = []
         self.search_stats = []
         self.outcome = None
@@ -56,7 +56,7 @@ class GameHistory:
         return move_index
 
     def get_observation(self, move_index: int) -> dict[str, np.ndarray]:
-        game = self.new_game()
+        game = new_game()
 
         for i in range(move_index):
             game.step(self.actions[i])
@@ -74,3 +74,9 @@ class GameHistory:
             self.search_stats[move_index],
             self.outcome[self.cur_player(move_index)],
         )
+
+
+def new_game():
+    game = Chess()
+    game.reset()
+    return game

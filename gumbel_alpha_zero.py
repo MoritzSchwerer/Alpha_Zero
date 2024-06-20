@@ -3,12 +3,10 @@ import torch
 import math
 import copy
 
-from typing import Tuple, List, Any, Optional
-from mcts import Node
 from tqdm import tqdm
 
 from network import PredictionNetwork
-from game import GameHistory
+from game import GameHistory, new_game
 from config import AlphaZeroConfig
 from mcts import Node, expand_node
 
@@ -59,14 +57,8 @@ def select_child(config: AlphaZeroConfig, node: Node):
 
 @torch.no_grad
 def play_game(config: AlphaZeroConfig, network: PredictionNetwork):
-
-    if torch.cuda.is_available() and torch.backends.cudnn.version() >= 7603:
-        network = network.to(
-            device=DEVICE, memory_format=torch.channels_last
-        ).half()
-
-    base_game = config.new_game()
-    history = GameHistory(config.new_game)
+    base_game = new_game()
+    history = GameHistory()
 
     for _ in tqdm(range(config.max_moves)):
         obs, _, term, trunc, _ = base_game.last()
@@ -145,7 +137,7 @@ def run_sequential_halving(
                 config.num_simulations / (num_phases * curr_num_actions)
             )
         for _ in range(max_num_sims):
-            for _, r_action in enumerate(actions):
+            for r_action in actions:
                 game = copy.deepcopy(base_game)
                 game.step(r_action)
                 node = root.children[r_action]
@@ -164,6 +156,7 @@ def run_sequential_halving(
                 action_mask = obs['action_mask']
                 current_player = game.agent_selection
 
+                # NOTE: Maybe here make this batched
                 if term or trunc:
                     value = game._cumulative_rewards[current_player]
                 else:

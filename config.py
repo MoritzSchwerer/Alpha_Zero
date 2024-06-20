@@ -1,7 +1,6 @@
 class AlphaZeroConfig:
-    def __init__(self, new_game_fn):
+    def __init__(self):
 
-        self.new_game = new_game_fn
         self.self_play_batch_size = 128
         self.max_num_threads = 8
         self.num_processes = 32
