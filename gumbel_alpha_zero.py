@@ -2,6 +2,7 @@ import numpy as np
 import torch
 import math
 import copy
+import sys
 
 from tqdm import tqdm
 
@@ -55,6 +56,7 @@ def select_child(config: AlphaZeroConfig, node: Node):
     return action, node.children[action]
 
 
+# TODO: batch the play_game function, this should be something like a 30% speed improvement
 @torch.no_grad
 def play_game(config: AlphaZeroConfig, network: PredictionNetwork):
     base_game = new_game()
@@ -137,7 +139,13 @@ def run_sequential_halving(
                 config.num_simulations / (num_phases * curr_num_actions)
             )
         for _ in range(max_num_sims):
-            for r_action in actions:
+            states = []
+            action_masks = []
+            search_paths = []
+            players = []
+            dones = []
+            outcomes = []
+            for idx, r_action in enumerate(actions):
                 game = copy.deepcopy(base_game)
                 game.step(r_action)
                 node = root.children[r_action]
@@ -152,44 +160,49 @@ def run_sequential_halving(
 
                 # run network on leaf node
                 obs, _, term, trunc, _ = game.last()
-                state = obs['observation']
-                action_mask = obs['action_mask']
                 current_player = game.agent_selection
+                states.append(obs['observation'])
+                action_masks.append(obs['action_mask'])
+                search_paths.append(search_path)
+                players.append(current_player)
+                dones.append(term or trunc)
+                outcomes.append(game._cumulative_rewards)
 
-                # NOTE: Maybe here make this batched
-                if term or trunc:
-                    value = game._cumulative_rewards[current_player]
-                else:
-                    state = (
-                        torch.from_numpy(state.copy())
-                        .permute(2, 0, 1)
-                        .unsqueeze(0)
-                        .to(
-                            device=DEVICE,
-                            memory_format=torch.channels_last,
-                            dtype=torch.float16,
-                        )
-                    )
-                    logits, value = network(state)
-                    logits, value = (
-                        logits.cpu().flatten().numpy(),
-                        value.cpu().flatten().numpy(),
-                    )
-                    # expand node
+            state = (
+                torch.from_numpy(np.stack(states, 0))
+                .permute(0, 3, 1, 2)
+                .to(
+                    device=DEVICE,
+                    memory_format=torch.channels_last,
+                    dtype=torch.float16,
+                )
+            )
+            logits, values = network(state)
+            logits, values = (
+                logits.cpu().numpy(),
+                values.cpu().flatten().numpy(),
+            )
+            n_values = [
+                outcomes[idx][players[idx]] if dones[idx] else values[idx]
+                for idx in range(len(outcomes))
+            ]
+
+            for idx in range(len(search_paths)):
+                if not dones[idx]:
                     expand_node(
-                        search_path[-1],
-                        current_player,
-                        action_mask,
-                        logits=logits,
+                        search_paths[idx][-1],
+                        players[idx],
+                        action_masks[idx],
+                        logits=logits[idx],
                     )
-                for s_node in search_path:
+                for s_node in search_paths[idx]:
                     s_node.visit_count += 1
                     s_node.value_sum += float(
-                        value
+                        n_values[idx]
                         if s_node.cur_player == current_player
-                        else -value
+                        else -n_values[idx]
                     )
-                num_performed_sims += 1
+            num_performed_sims += curr_num_actions
 
         # after all actions have been simulated for the current phase
         # only keep best half of actions

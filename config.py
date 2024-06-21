@@ -6,7 +6,7 @@ class AlphaZeroConfig:
         self.num_processes = 32
 
         # gumbel
-        self.num_sampled_actions = 4
+        self.num_sampled_actions = 2
         self.c_visit = 50
         self.c_scale = 1.0
 
@@ -21,7 +21,7 @@ class AlphaZeroConfig:
         self.pb_c_init = 1.25
 
         # other
-        self.num_simulations = 16
+        self.num_simulations = 2
 
     def softmax_temperature_fn(self, num_moves=30):
         return 1 if num_moves < 30 else 0
