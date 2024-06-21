@@ -59,56 +59,76 @@ def select_child(config: AlphaZeroConfig, node: Node):
 # TODO: batch the play_game function, this should be something like a 30% speed improvement
 @torch.no_grad
 def play_game(config: AlphaZeroConfig, network: PredictionNetwork):
-    base_game = new_game()
-    history = GameHistory()
+    base_games = [new_game() for _ in range(config.self_play_batch_size)]
+    histories = [GameHistory() for _ in range(config.self_play_batch_size)]
 
+    # curr_batch_size = config.self_play_batch_size
     for _ in tqdm(range(config.max_moves)):
-        obs, _, term, trunc, _ = base_game.last()
+        states = [None] * config.self_play_batch_size
+        action_masks = [None] * config.self_play_batch_size
+        dones = np.zeros(config.self_play_batch_size, dtype=bool)
+        for idx in range(len(base_games)):
+            obs, _, term, trunc, _ = base_games[idx].last()
 
-        if term or trunc:
-            break
+            if term or trunc:
+                dones[idx] = True
+                continue
 
-        state = obs['observation']
+            states[idx] = obs['observation']
+            action_masks[idx] = obs['action_mask']
+
+        valid_indices = (~dones).nonzero()[0]
+        state = [states[idx] for idx in valid_indices]
+        state = np.stack(state, 0)
         state = (
-            torch.from_numpy(state.copy())
-            .permute(2, 0, 1)
-            .unsqueeze(0)
+            torch.from_numpy(state)
+            .permute(0, 3, 1, 2)
             .to(
                 device=DEVICE,
                 memory_format=torch.channels_last,
                 dtype=torch.float16,
             )
         )
-        logits = network(state)[0].flatten().cpu().numpy()
+        logits = network(state)[0].cpu().numpy()
 
-        root = Node(0)
-        expand_node(
-            root,
-            base_game.agent_selection,
-            obs['action_mask'],
-            logits=logits,
-        )
+        n_logits = np.zeros((config.self_play_batch_size, logits.shape[1]))
+        n_logits[valid_indices] = logits
 
-        # after we expanded the root we select the initial n actions
-        legal_actions = np.array([a for a in root.children.keys()])
-        gumbel = np.random.gumbel(size=len(logits))
-        top_k_ind = top_k_actions(
-            config, root, legal_actions, gumbel, config.num_sampled_actions
-        )
-        initial_actions = legal_actions[top_k_ind]
+        for idx in range(len(base_games)):
 
-        # step the independent games according to their selected action
-        # select final action via sequential halving
-        action = run_sequential_halving(
-            config, network, root, initial_actions, base_game, gumbel
-        )
+            if dones[idx]:
+                continue
 
-        assert action in legal_actions
-        base_game.step(action)
-        history.store_statistics(action)
-    history.outcome = base_game._cumulative_rewards
-    history.consolidate()
-    return history
+            root = Node(0)
+            expand_node(
+                root,
+                base_games[idx].agent_selection,
+                action_masks[idx],
+                logits=n_logits[idx],
+            )
+
+            # after we expanded the root we select the initial n actions
+            legal_actions = np.array([a for a in root.children.keys()])
+            gumbel = np.random.gumbel(size=config.action_space_size)
+            top_k_ind = top_k_actions(
+                config, root, legal_actions, gumbel, config.num_sampled_actions
+            )
+            initial_actions = legal_actions[top_k_ind]
+
+            # step the independent games according to their selected action
+            # select final action via sequential halving
+            action = run_sequential_halving(
+                config, network, root, initial_actions, base_games[idx], gumbel
+            )
+
+            assert action in legal_actions
+            base_games[idx].step(action)
+            histories[idx].store_statistics(action)
+
+    for history, game in zip(histories, base_games):
+        history.outcome = game._cumulative_rewards
+        history.consolidate()
+    return histories
 
 
 # TODO: try in run mcts and play_game to store the game inside the node
@@ -131,14 +151,14 @@ def run_sequential_halving(
     for phase in reversed(range(int(num_phases))):
         # for each action do the correct number of simulations
 
-        if phase == 0:
-            sims_left = config.num_simulations - num_performed_sims
-            max_num_sims = sims_left // curr_num_actions
-        else:
-            max_num_sims = int(
-                config.num_simulations / (num_phases * curr_num_actions)
-            )
+        max_num_sims = (
+            (config.num_simulations - num_performed_sims) // curr_num_actions
+            if phase == 0
+            else (config.num_simulations // (num_phases * curr_num_actions))
+        )
+
         for _ in range(max_num_sims):
+            # TODO: here is where you loop over all games
             states = []
             action_masks = []
             search_paths = []

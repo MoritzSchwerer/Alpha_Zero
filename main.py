@@ -13,6 +13,7 @@ from config import AlphaZeroConfig
 Took 89   seconds for 48   games (1.9s per game)
 Took 1010 seconds for 1024 games (1.0s per game)
 Took 846  seconds for 768  games (1.2s per game)
+Took 432  seconds for 4096 games (0.1s per game) (gumbel: 2 sims, 128 batch)
 """
 
 DEVICE = 'cuda:0' if torch.cuda.is_available() else 'cpu'
@@ -24,7 +25,6 @@ def main():
     torch.backends.cudnn.benchmark = True
 
     config = AlphaZeroConfig()
-    num_processes = 64
     net = PredictionNetwork(
         in_channels=111,
         use_bn=False,
@@ -37,12 +37,13 @@ def main():
 
     torch.compile(net, mode='max-autotune')
     start = time.time_ns()
-    with mp.get_context('spawn').Pool(processes=4) as pool:
-        games = pool.starmap(play_game, [(config, net)] * num_processes)
-    # for _ in range(10):
-    #     game = play_game(config, net)
+    # with mp.get_context('spawn').Pool(
+    #     processes=config.max_num_threads
+    # ) as pool:
+    # games = pool.starmap(play_game, [(config, net)] * config.num_processes)
+    game = play_game(config, net)
     print(
-        f'Took {round((time.time_ns()-start) / 1e9, 1)} seconds for {num_processes} games'
+        f'Took {round((time.time_ns()-start) / 1e9, 1)} seconds for {config.num_processes*config.self_play_batch_size} games'
     )
 
 
