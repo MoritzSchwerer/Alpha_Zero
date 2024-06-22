@@ -3,7 +3,7 @@ class AlphaZeroConfig:
 
         self.self_play_batch_size = 128
         self.max_num_threads = 8
-        self.num_processes = 32
+        self.num_processes = 64
 
         # gumbel
         self.num_sampled_actions = 2

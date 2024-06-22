@@ -5,9 +5,10 @@ import copy
 import sys
 
 from tqdm import tqdm
+from typing import List
 
 from network import PredictionNetwork
-from game import GameHistory, new_game
+from game import GameHistory, new_game, Chess
 from config import AlphaZeroConfig
 from mcts import Node, expand_node
 
@@ -22,6 +23,8 @@ def top_k_actions(
     gumbel: np.ndarray,
     k: int,
 ) -> np.ndarray:
+
+    k = int(k)
 
     if len(actions) <= k:
         return np.array(range(len(actions)))
@@ -56,7 +59,11 @@ def select_child(config: AlphaZeroConfig, node: Node):
     return action, node.children[action]
 
 
-# TODO: batch the play_game function, this should be something like a 30% speed improvement
+# TODO: the sequential_halving function still needs some checks to avoid
+# unnessessary cumputation but first make play game actually call
+# sequential_halving correctly to test
+
+# TODO: implementation is to fast as of now so there is a mistake fix it!!!
 @torch.no_grad
 def play_game(config: AlphaZeroConfig, network: PredictionNetwork):
     base_games = [new_game() for _ in range(config.self_play_batch_size)]
@@ -67,15 +74,15 @@ def play_game(config: AlphaZeroConfig, network: PredictionNetwork):
         states = [None] * config.self_play_batch_size
         action_masks = [None] * config.self_play_batch_size
         dones = np.zeros(config.self_play_batch_size, dtype=bool)
-        for idx in range(len(base_games)):
-            obs, _, term, trunc, _ = base_games[idx].last()
+        for game_idx in range(len(base_games)):
+            obs, _, term, trunc, _ = base_games[game_idx].last()
 
             if term or trunc:
-                dones[idx] = True
+                dones[game_idx] = True
                 continue
 
-            states[idx] = obs['observation']
-            action_masks[idx] = obs['action_mask']
+            states[game_idx] = obs['observation']
+            action_masks[game_idx] = obs['action_mask']
 
         valid_indices = (~dones).nonzero()[0]
         state = [states[idx] for idx in valid_indices]
@@ -94,6 +101,10 @@ def play_game(config: AlphaZeroConfig, network: PredictionNetwork):
         n_logits = np.zeros((config.self_play_batch_size, logits.shape[1]))
         n_logits[valid_indices] = logits
 
+        roots = []
+        all_initial_actions = []
+        gumbels = []
+        all_games = []
         for idx in range(len(base_games)):
 
             if dones[idx]:
@@ -111,18 +122,30 @@ def play_game(config: AlphaZeroConfig, network: PredictionNetwork):
             legal_actions = np.array([a for a in root.children.keys()])
             gumbel = np.random.gumbel(size=config.action_space_size)
             top_k_ind = top_k_actions(
-                config, root, legal_actions, gumbel, config.num_sampled_actions
+                config,
+                root,
+                legal_actions,
+                gumbel,
+                config.num_sampled_actions,
             )
             initial_actions = legal_actions[top_k_ind]
 
-            # step the independent games according to their selected action
-            # select final action via sequential halving
-            action = run_sequential_halving(
-                config, network, root, initial_actions, base_games[idx], gumbel
-            )
+            roots.append(root)
+            all_initial_actions.append(initial_actions)
+            gumbels.append(gumbel)
+            all_games.append(base_games[idx])
 
-            assert action in legal_actions
-            base_games[idx].step(action)
+        actions = run_sequential_halving(
+            config,
+            network,
+            roots,
+            all_initial_actions,
+            all_games,
+            gumbels,
+        )
+
+        for idx, action in enumerate(actions):
+            all_games[idx].step(action)
             histories[idx].store_statistics(action)
 
     for history, game in zip(histories, base_games):
@@ -136,102 +159,186 @@ def play_game(config: AlphaZeroConfig, network: PredictionNetwork):
 def run_sequential_halving(
     config: AlphaZeroConfig,
     network: PredictionNetwork,
-    root: Node,
-    actions: np.ndarray,
-    base_game,
+    roots: List[Node],
+    actions: List[np.ndarray],
+    base_games: List[Chess],
     gumbel: np.ndarray,
-) -> int:
+) -> List[int]:
+    """
+    actions shape: list(num_games, np.array(initial_actions))
+    gumbel  shape: (num_games, action_space)
+    """
     # we get n actions and we want to reduce the number of actions in half for each step
-    initial_num_actions = min(len(actions), config.num_sampled_actions)
-    curr_num_actions = initial_num_actions
+    num_games = len(base_games)
 
-    num_performed_sims = 0
-    num_phases = math.ceil(math.log2(initial_num_actions))
+    initial_num_actions = [
+        min(len(acs), config.num_sampled_actions) for acs in actions
+    ]
+    curr_num_actions = initial_num_actions.copy()
 
-    for phase in reversed(range(int(num_phases))):
-        # for each action do the correct number of simulations
+    num_performed_sims = np.zeros(num_games)
+    num_phases = [
+        math.ceil(math.log2(num_actions))
+        for num_actions in initial_num_actions
+    ]
 
-        max_num_sims = (
-            (config.num_simulations - num_performed_sims) // curr_num_actions
-            if phase == 0
-            else (config.num_simulations // (num_phases * curr_num_actions))
-        )
+    for phase in range(max(num_phases)):
+        # find if phase is last phase
 
-        for _ in range(max_num_sims):
-            # TODO: here is where you loop over all games
-            states = []
-            action_masks = []
-            search_paths = []
-            players = []
-            dones = []
-            outcomes = []
-            for idx, r_action in enumerate(actions):
-                game = copy.deepcopy(base_game)
-                game.step(r_action)
-                node = root.children[r_action]
-                search_path = [root, node]
-                while node.is_expanded:
-                    # select the action and node according to distribution
-                    action, node = select_child(config, node)
-                    # step game using selected action
-                    game.step(action)
-                    # store node for backpropagation
-                    search_path.append(node)
-
-                # run network on leaf node
-                obs, _, term, trunc, _ = game.last()
-                current_player = game.agent_selection
-                states.append(obs['observation'])
-                action_masks.append(obs['action_mask'])
-                search_paths.append(search_path)
-                players.append(current_player)
-                dones.append(term or trunc)
-                outcomes.append(game._cumulative_rewards)
-
-            state = (
-                torch.from_numpy(np.stack(states, 0))
-                .permute(0, 3, 1, 2)
-                .to(
-                    device=DEVICE,
-                    memory_format=torch.channels_last,
-                    dtype=torch.float16,
+        max_num_sims = []
+        for num_sims, num_actions, num_phase in zip(
+            num_performed_sims, curr_num_actions, num_phases
+        ):
+            is_last_p = phase + 1 == num_phase
+            max_num_sims.append(
+                int(
+                    (config.num_simulations - num_sims) // num_actions
+                    if is_last_p
+                    else (
+                        config.num_simulations
+                        // max(num_phase * num_actions, 1)
+                    )
                 )
             )
-            logits, values = network(state)
-            logits, values = (
-                logits.cpu().numpy(),
-                values.cpu().flatten().numpy(),
-            )
-            n_values = [
-                outcomes[idx][players[idx]] if dones[idx] else values[idx]
-                for idx in range(len(outcomes))
-            ]
 
-            for idx in range(len(search_paths)):
-                if not dones[idx]:
-                    expand_node(
-                        search_paths[idx][-1],
-                        players[idx],
-                        action_masks[idx],
-                        logits=logits[idx],
+        for sim_idx in range(max(max_num_sims)):
+            states = np.zeros(
+                (num_games, max(curr_num_actions), 8, 8, 111), dtype=bool
+            )
+            dones = np.zeros((num_games, max(curr_num_actions)), dtype=bool)
+            valid_steps = np.zeros(
+                (num_games, max(curr_num_actions)), dtype=bool
+            )
+            action_masks_2d = np.zeros(
+                (num_games, max(curr_num_actions), config.action_space_size),
+                dtype=bool,
+            )
+            search_paths_2d = [None] * num_games
+            players_2d = [None] * num_games
+            outcomes_2d = [None] * num_games
+            # for every game collect all actions
+            for game_idx in range(num_games):
+                if phase >= num_phases[game_idx]:
+                    continue
+                if sim_idx >= max_num_sims[game_idx]:
+                    continue
+                search_paths = [None] * curr_num_actions[game_idx]
+                players = [None] * curr_num_actions[game_idx]
+                outcomes = [None] * curr_num_actions[game_idx]
+                for action_idx, r_action in enumerate(actions[game_idx]):
+                    if action_idx >= curr_num_actions[game_idx]:
+                        break
+                    game = copy.deepcopy(base_games[game_idx])
+                    game.step(r_action)
+                    node = roots[game_idx].children[r_action]
+                    search_path = [roots[game_idx], node]
+                    while node.is_expanded:
+                        # select the action and node according to distribution
+                        action, node = select_child(config, node)
+                        # step game using selected action
+                        game.step(action)
+                        # store node for backpropagation
+                        search_path.append(node)
+
+                    # run network on leaf node
+                    obs, _, term, trunc, _ = game.last()
+
+                    states[game_idx, action_idx] = obs['observation']
+                    action_masks_2d[game_idx, action_idx] = obs['action_mask']
+                    dones[game_idx, action_idx] = term or trunc
+                    valid_steps[game_idx, action_idx] = True
+
+                    search_paths[action_idx] = search_path
+                    players[action_idx] = game.agent_selection
+                    outcomes[action_idx] = game._cumulative_rewards
+
+                search_paths_2d[game_idx] = search_paths
+                players_2d[game_idx] = players
+                outcomes_2d[game_idx] = outcomes
+
+            # now we need to ignore the invalid steps
+            # and construct only the usefull states
+            valid_indices = np.logical_and(
+                valid_steps.flatten(), np.logical_not(dones.flatten())
+            ).nonzero()[0]
+
+            states = states.reshape(
+                (num_games * max(curr_num_actions), 8, 8, 111)
+            )
+
+            n_values = np.zeros(states.shape[0])
+            n_logits = np.zeros((states.shape[0], config.action_space_size))
+            if len(valid_indices) > 0:
+                valid_states = states[valid_indices]
+
+                state = (
+                    torch.from_numpy(valid_states)
+                    .permute(0, 3, 1, 2)
+                    .to(
+                        device=DEVICE,
+                        memory_format=torch.channels_last,
+                        dtype=torch.float16,
                     )
-                for s_node in search_paths[idx]:
-                    s_node.visit_count += 1
-                    s_node.value_sum += float(
-                        n_values[idx]
-                        if s_node.cur_player == current_player
-                        else -n_values[idx]
-                    )
-            num_performed_sims += curr_num_actions
+                )
+                logits, values = network(state)
+                logits, values = (
+                    logits.cpu().numpy(),
+                    values.cpu().flatten().numpy(),
+                )
+
+                n_values[valid_indices] = values
+                n_logits[valid_indices] = logits
+
+            n_values = n_values.reshape((num_games, max(curr_num_actions)))
+            n_logits = n_logits.reshape(
+                (num_games, max(curr_num_actions), config.action_space_size)
+            )
+
+            for game_idx in range(num_games):
+                if search_paths_2d[game_idx] is None:
+                    continue
+                for action_idx in range(len(search_paths_2d[game_idx])):
+                    if dones[game_idx, action_idx]:
+                        value = int(
+                            outcomes_2d[game_idx][action_idx][
+                                players_2d[game_idx][action_idx]
+                            ]
+                        )
+                    else:
+                        value = int(n_values[game_idx, action_idx])
+
+                    if (not dones[game_idx, action_idx]) and valid_steps[
+                        game_idx, action_idx
+                    ]:
+                        expand_node(
+                            search_paths_2d[game_idx][action_idx][-1],
+                            players_2d[game_idx][action_idx],
+                            action_masks_2d[game_idx, action_idx],
+                            logits=n_logits[game_idx, action_idx],
+                        )
+                    if valid_steps[game_idx, action_idx]:
+                        for s_node in search_paths_2d[game_idx][action_idx]:
+                            s_node.visit_count += 1
+                            s_node.value_sum += float(
+                                value
+                                if s_node.cur_player
+                                == players_2d[game_idx][action_idx]
+                                else -value
+                            )
+                num_performed_sims[game_idx] += curr_num_actions[game_idx]
 
         # after all actions have been simulated for the current phase
         # only keep best half of actions
-        curr_num_actions = math.ceil(curr_num_actions / 2)
+        curr_num_actions = [math.ceil(cna / 2) for cna in curr_num_actions]
 
-        top_k_ind = top_k_actions(
-            config, root, actions, gumbel, curr_num_actions
-        )
-        actions = actions[top_k_ind]
+        for game_idx in range(num_games):
+            top_k_ind = top_k_actions(
+                config,
+                roots[game_idx],
+                actions[game_idx],
+                gumbel[game_idx],
+                curr_num_actions[game_idx],
+            )
+            actions[game_idx] = actions[game_idx][top_k_ind]
 
-    assert actions.shape == (1,)
-    return actions.item()
+    return actions
