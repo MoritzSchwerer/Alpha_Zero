@@ -10,6 +10,13 @@ __pycache__/
 profiler/
 stats.py
 
+# data
+data/
+replay_buffer/
+
+# local tests
+test.py
+
 # Distribution / packaging
 .Python
 build/

@@ -2,7 +2,6 @@ import numpy as np
 import torch
 import math
 import copy
-import sys
 
 from tqdm import tqdm
 from typing import List
@@ -59,11 +58,6 @@ def select_child(config: AlphaZeroConfig, node: Node):
     return action, node.children[action]
 
 
-# TODO: the sequential_halving function still needs some checks to avoid
-# unnessessary cumputation but first make play game actually call
-# sequential_halving correctly to test
-
-# TODO: implementation is to fast as of now so there is a mistake fix it!!!
 @torch.no_grad
 def play_game(config: AlphaZeroConfig, network: PredictionNetwork):
     base_games = [new_game() for _ in range(config.self_play_batch_size)]
@@ -85,8 +79,8 @@ def play_game(config: AlphaZeroConfig, network: PredictionNetwork):
             action_masks[game_idx] = obs['action_mask']
 
         valid_indices = (~dones).nonzero()[0]
-        state = [states[idx] for idx in valid_indices]
-        state = np.stack(state, 0)
+        states = [states[idx] for idx in valid_indices]
+        state = np.stack(states, 0)
         state = (
             torch.from_numpy(state)
             .permute(0, 3, 1, 2)
@@ -105,6 +99,7 @@ def play_game(config: AlphaZeroConfig, network: PredictionNetwork):
         all_initial_actions = []
         gumbels = []
         all_games = []
+        all_histories = []
         for idx in range(len(base_games)):
 
             if dones[idx]:
@@ -134,6 +129,7 @@ def play_game(config: AlphaZeroConfig, network: PredictionNetwork):
             all_initial_actions.append(initial_actions)
             gumbels.append(gumbel)
             all_games.append(base_games[idx])
+            all_histories.append(histories[idx])
 
         actions = run_sequential_halving(
             config,
@@ -144,9 +140,23 @@ def play_game(config: AlphaZeroConfig, network: PredictionNetwork):
             gumbels,
         )
 
+        assert len(all_games) == len(actions) == len(roots) == len(states)
         for idx, action in enumerate(actions):
             all_games[idx].step(action)
-            histories[idx].store_statistics(action)
+
+            stats = {}
+            for a, c_node in roots[idx].children.items():
+                stats[a] = float(
+                    c_node.value
+                    if c_node.visit_count >= 1
+                    else roots[idx].value
+                )
+            all_histories[idx].store_statistics(
+                action,
+                root_value=roots[idx].value,
+                stats=stats,
+                state=states[idx],
+            )
 
     for history, game in zip(histories, base_games):
         history.outcome = game._cumulative_rewards
@@ -154,8 +164,6 @@ def play_game(config: AlphaZeroConfig, network: PredictionNetwork):
     return histories
 
 
-# TODO: try in run mcts and play_game to store the game inside the node
-# to reduce the number of steps needed
 def run_sequential_halving(
     config: AlphaZeroConfig,
     network: PredictionNetwork,

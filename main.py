@@ -1,58 +1,34 @@
-import torch
-import multiprocessing as mp
-import os
-import time
-
-from network import PredictionNetwork
-from gumbel_alpha_zero import play_game
-from game import Chess
+from train import Trainer
 from config import AlphaZeroConfig
-
-
-"""
-Took 89   seconds for 48   games (1.9s per game)
-Took 1010 seconds for 1024 games (1.0s per game)
-Took 846  seconds for 768  games (1.2s per game)
-Took 432  seconds for 4096 games (0.1s per game) (gumbel: 2 sims, 128 batch)
-"""
-
-DEVICE = 'cuda:0' if torch.cuda.is_available() else 'cpu'
-THREADED = False
-
+from storage import HDF5Config, ReplayBuffer
+from network import NetworkStorage, NetworkConfig
 
 def main():
-    os.environ['MKL_NUM_THREADS'] = '1'
-    torch.set_num_threads(1)
-    torch.backends.cudnn.benchmark = True
+    game_length = 100
 
-    config = AlphaZeroConfig()
-    net = PredictionNetwork(
-        in_channels=111,
-        use_bn=False,
-        interm_channels=128,
-        # num_blocks=39,
-    ).eval()
+    hdf5_config = HDF5Config(game_length=game_length, compression='lzf')
+    replay_buffer = ReplayBuffer(
+        hdf5_config,
+        base_dir='./replay_buffer/',
+        base_name=f'sample_red_chunk_l{game_length}'
+    )
 
-    if torch.cuda.is_available() and torch.backends.cudnn.version() >= 7603:
-        net = net.to(device=DEVICE, memory_format=torch.channels_last).half()
+    network_config = NetworkConfig(interm_channels=128)
+    network_storage = NetworkStorage(network_config, dir='./networks')
 
-    torch.compile(net, mode='max-autotune')
-    start = time.time_ns()
-    if THREADED:
-        with mp.get_context('spawn').Pool(
-            processes=config.max_num_threads
-        ) as pool:
-            games = pool.starmap(
-                play_game, [(config, net)] * config.num_processes
-            )
-        print(
-            f'Took {round((time.time_ns()-start) / 1e9, 1)} seconds for {config.num_processes*config.self_play_batch_size} games'
-        )
-    else:
-        game = play_game(config, net)
-        print(
-            f'Took {round((time.time_ns()-start) / 1e9, 1)} seconds for {config.self_play_batch_size} games'
-        )
+    config = AlphaZeroConfig(
+        game_length=game_length,
+        num_processes=16,
+        self_play_batch_size=128
+    )
+    trainer = Trainer(
+        config,
+        replay_buffer=replay_buffer,
+        network_storage=network_storage
+    )
+
+    trainer.self_play()
+    print(f"Number of games generated: {trainer.replay_buffer.current_size}")
 
 
 if __name__ == '__main__':

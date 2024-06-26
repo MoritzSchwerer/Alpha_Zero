@@ -1,9 +1,14 @@
 class AlphaZeroConfig:
-    def __init__(self):
+    def __init__(self,
+        self_play_batch_size: int = 128,
+        max_num_threads: int = 8,
+        num_processes:int = 40,
+        game_length: int = 100,
+    ):
 
-        self.self_play_batch_size = 128
-        self.max_num_threads = 8
-        self.num_processes = 64
+        self.self_play_batch_size = self_play_batch_size
+        self.max_num_threads = max_num_threads
+        self.num_processes = num_processes
 
         # gumbel
         self.num_sampled_actions = 2
@@ -11,7 +16,7 @@ class AlphaZeroConfig:
         self.c_scale = 1.0
 
         # game settings
-        self.max_moves = 100
+        self.max_moves = game_length
         self.action_space_size = 4672
 
         # exploration

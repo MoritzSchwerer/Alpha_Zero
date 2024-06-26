@@ -25,15 +25,25 @@ class Chess(chess_v6.raw_env):
 class GameHistory:
     def __init__(self):
         self.actions = []
+        self.root_values = []
         self.search_stats = []
+        self.states = []
         self.outcome = None
 
     def store_statistics(
-        self, action: int, stats: Optional[np.ndarray] = None
+        self,
+        action: int,
+        stats: Optional[dict[int, float]] = None,
+        root_value: Optional[float] = None,
+        state: Optional[np.ndarray] = None,
     ) -> None:
         self.actions.append(action)
         if stats is not None:
             self.search_stats.append(stats)
+        if root_value is not None:
+            self.root_values.append(root_value)
+        if state is not None:
+            self.states.append(state)
 
     def __len__(self) -> int:
         return len(self.actions)
@@ -46,9 +56,11 @@ class GameHistory:
         """
         enables object to be stored more efficiently
         """
-        self.actions = np.array(self.actions, dtype=np.int64)
-        if len(self.search_stats) > 0:
-            self.search_stats = np.stack(self.search_stats, 0)
+        self.actions = np.array(self.actions, dtype=np.int32).flatten()
+        if len(self.root_values) > 0:
+            self.root_values = np.array(self.root_values, dtype=np.float32)
+        if len(self.states) > 0:
+            self.states = np.stack(self.states, 0).astype(bool)
 
     def sample_position(self) -> int:
         assert self.consolidated, 'Object needs to be consolidated first'
