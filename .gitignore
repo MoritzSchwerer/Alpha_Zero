@@ -13,6 +13,7 @@ stats.py
 # data
 data/
 replay_buffer/
+networks/
 
 # local tests
 test.py

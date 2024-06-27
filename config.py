@@ -25,6 +25,9 @@ class AlphaZeroConfig:
         self.pb_c_base = 19652
         self.pb_c_init = 1.25
 
+        # training
+        self.batch_size = 4096
+
         # other
         self.num_simulations = 2
 

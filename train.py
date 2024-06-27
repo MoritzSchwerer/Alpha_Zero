@@ -1,5 +1,8 @@
-import multiprocessing as mp
 import torch
+import torch.nn.functional as F
+import concurrent.futures
+import multiprocessing as mp
+import time
 
 from config import AlphaZeroConfig
 from storage import ReplayBuffer
@@ -22,10 +25,16 @@ class Trainer:
         config: AlphaZeroConfig,
         replay_buffer: ReplayBuffer,
         network_storage: NetworkStorage,
+        beta_value: float = 0.5,
+        lr: float = 0.2,
+        train_factor: int = 4,
     ):
         self.config = config
         self.replay_buffer = replay_buffer
         self.network_storage = network_storage
+        self.beta_value = beta_value
+        self.current_lr = lr
+        self.train_factor = train_factor
 
         if not self.replay_buffer.init_from_dataset():
             self.replay_buffer.create_dataset()
@@ -45,38 +54,100 @@ class Trainer:
         print(f"and {num_iterations} iterations")
         print(f"Totaling {games_per_run*num_iterations} games.")
         for i in range(num_iterations):
-            print("=" * 88)
-            print(f"Starting iteration {i+1}/{num_iterations}")
-            pool = mp.get_context("spawn").Pool(processes=self.config.max_num_threads)
             try:
-                games = pool.starmap(
-                    play_game, [(self.config, network)] * self.config.num_processes
-                )
-                games = [item for sublist in games for item in sublist]
+                executor = concurrent.futures.ProcessPoolExecutor(max_workers=self.config.max_num_threads, mp_context=mp.get_context('spawn'))
+                futures = []
+                for _ in range(self.config.num_processes):
+                    futures.append(executor.submit(play_game, self.config, self.network_storage.network_config, network))
+
+                pbar = tqdm(total=self.config.num_processes)
+                for future in concurrent.futures.as_completed(futures):
+                    pbar.update(1)
+                    games = future.result()
+
+                    # this is to make sure that we only fill up a file exactly
+                    file_size =self.replay_buffer.config.file_size
+                    file_games_left = file_size - self.replay_buffer.current_size % file_size
+                    games = games[:file_games_left]
+
+                    self.replay_buffer.append(games)
+                    del games
+                executor.shutdown(wait=True)
+            except Exception as e:
+                print(e)
+                executor.shutdown()
             finally:
-                pool.close()
-                pool.join()
+                executor.shutdown()
 
-            # this is to make sure that we only fill up a file exactly
-            file_size =self.replay_buffer.config.file_size
-            file_games_left = file_size - self.replay_buffer.current_size % file_size
-            games = games[:file_games_left]
 
-            self.replay_buffer.append(games)
-
-    # TODO: write this
+    # TODO: track stats here like losses and so on
     def train(self):
         network = self.network_storage.get_latest(train=True)
-        optim = torch.optim.AdamW(network.parameters(), lr=0.2)
+        optim = torch.optim.AdamW(network.parameters(), lr=self.current_lr)
 
-        for i in tqdm(range(1000)):
-            data = self.replay_buffer.sample_examples(batch_size=4096)
+        batch_size = self.config.batch_size
+        num_iterations = (self.replay_buffer.current_size * self.train_factor) // batch_size
+
+        print(f"Running training for {num_iterations} iterations")
+        print(f"making {num_iterations*batch_size} samples out of {self.replay_buffer.current_size} games")
+        pbar = tqdm(total=num_iterations)
+        total_time_sample = 0
+        total_time_network = 0
+        for i in range(num_iterations):
+
+            start_time = time.time_ns()
+            data = self.replay_buffer.sample_examples(batch_size=batch_size)
+            total_time_sample += (time.time_ns()-start_time)
+
             state, value_target, policy_target = data
+            value_target = torch.from_numpy(value_target).to(device='cuda:0')
+            policy_target = torch.from_numpy(policy_target).to(device='cuda:0')
+            state = (
+                torch.from_numpy(state)
+                .reshape(-1, 8, 8, 111)
+                .permute(0, 3, 1, 2)
+                .to(
+                    device='cuda:0',
+                    memory_format=torch.channels_last,
+                    dtype=torch.float16,
+                )
+            )
+            start_time = time.time_ns()
             policy_pred, value_pred = network(state)
 
-            # TODO: place holder
-            loss = (value_pred - value_target) + (policy_pred - policy_target)
+            policy_pred = torch.log_softmax(policy_pred, 1)
+            imp_policy_target = torch.log_softmax(policy_pred.detach() + transform(policy_target), 1)
+
+            value_loss = (value_target - value_pred.view(-1)).pow(2).mean(0)
+            policy_loss = F.kl_div(policy_pred, imp_policy_target, reduction='batchmean', log_target=True)
+
+            loss = self.beta_value * value_loss + policy_loss
 
             optim.zero_grad()
             loss.backward()
             optim.step()
+            print((time.time_ns()-start_time) / 1e6)
+            total_time_network += (time.time_ns()-start_time)
+            sample_time = int(total_time_sample / (i+1) / 1e6)
+            network_time = int(total_time_network / (i+1) / 1e6) 
+            pbar.set_postfix({'sample': sample_time, 'network': network_time})
+            pbar.update(1)
+
+        self.network_storage.save_network(network)
+
+    def set_lr(self, lr: float):
+        self.current_lr = lr
+
+    def run(self, num_cycles: int, train_first: bool = False):
+        for cycle in range(num_cycles):
+            if train_first and cycle == 0:
+                self.train()
+                torch.cuda.empty_cache()
+            else:
+                self.self_play()
+                torch.cuda.empty_cache()
+                self.train()
+                torch.cuda.empty_cache()
+
+def transform(x):
+    return x * 50

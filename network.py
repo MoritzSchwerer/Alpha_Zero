@@ -138,10 +138,13 @@ class NetworkStorage:
         self.network_config = network_config
         self.dir = Path(dir)
         self.prefix = prefix
-        self.counter = 1
+        # initialize the counter correctly if we already have some networks
+        num_files = len(list(self.dir.glob(f"{self.prefix}*.pth")))
+        self.counter = num_files+1
 
     def save_network(self, net):
         # net = torch.decompile(net)
+        self.dir.mkdir(parents=True, exist_ok=True)
         net = net.train()
         net = net.to("cpu", memory_format=torch.contiguous_format)
         net = net.float()
@@ -160,10 +163,10 @@ class NetworkStorage:
     ):
         files = list(sorted(self.dir.glob(f"{self.prefix}*.pth")))
 
-        if len(files) == 0:
-            net = PredictionNetwork(self.network_config)
-        else:
-            net = torch.load(files[-1])
+        net = PredictionNetwork(self.network_config)
+        if len(files) != 0:
+            state_dict = torch.load(files[-1])
+            net.load_state_dict(state_dict)
 
         if self.network_config.half:
             net = net.half()

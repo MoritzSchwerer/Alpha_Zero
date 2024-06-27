@@ -3,16 +3,15 @@ import torch
 import math
 import copy
 
-from tqdm import tqdm
 from typing import List
 
-from network import PredictionNetwork
+from network import PredictionNetwork, NetworkConfig
 from game import GameHistory, new_game, Chess
 from config import AlphaZeroConfig
 from mcts import Node, expand_node
 
-DEVICE = 'cuda:0' if torch.cuda.is_available() else 'cpu'
-torch.set_float32_matmul_precision = 'medium'
+DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
+torch.set_float32_matmul_precision = "medium"
 
 
 def top_k_actions(
@@ -22,18 +21,15 @@ def top_k_actions(
     gumbel: np.ndarray,
     k: int,
 ) -> np.ndarray:
-
     k = int(k)
 
     if len(actions) <= k:
         return np.array(range(len(actions)))
 
-    max_visit_count = max(
-        node.children[action].visit_count for action in actions
-    )
-    value_func = lambda x: (
-        (config.c_visit + max_visit_count) * config.c_scale * x
-    )
+    max_visit_count = max(node.children[action].visit_count for action in actions)
+
+    def value_func(x):
+        return (config.c_visit + max_visit_count) * config.c_scale * x
 
     gumbel_logits = np.array(
         [
@@ -59,12 +55,14 @@ def select_child(config: AlphaZeroConfig, node: Node):
 
 
 @torch.no_grad
-def play_game(config: AlphaZeroConfig, network: PredictionNetwork):
+def play_game(
+    config: AlphaZeroConfig, network_config: NetworkConfig, network: PredictionNetwork
+):
     base_games = [new_game() for _ in range(config.self_play_batch_size)]
     histories = [GameHistory() for _ in range(config.self_play_batch_size)]
 
     # curr_batch_size = config.self_play_batch_size
-    for _ in tqdm(range(config.max_moves)):
+    for _ in range(config.max_moves):
         states = [None] * config.self_play_batch_size
         action_masks = [None] * config.self_play_batch_size
         dones = np.zeros(config.self_play_batch_size, dtype=bool)
@@ -75,97 +73,99 @@ def play_game(config: AlphaZeroConfig, network: PredictionNetwork):
                 dones[game_idx] = True
                 continue
 
-            states[game_idx] = obs['observation']
-            action_masks[game_idx] = obs['action_mask']
+            states[game_idx] = obs["observation"]
+            action_masks[game_idx] = obs["action_mask"]
 
-        valid_indices = (~dones).nonzero()[0]
-        states = [states[idx] for idx in valid_indices]
-        state = np.stack(states, 0)
-        state = (
-            torch.from_numpy(state)
-            .permute(0, 3, 1, 2)
-            .to(
-                device=DEVICE,
-                memory_format=torch.channels_last,
-                dtype=torch.float16,
-            )
-        )
-        logits = network(state)[0].cpu().numpy()
-
-        n_logits = np.zeros((config.self_play_batch_size, logits.shape[1]))
-        n_logits[valid_indices] = logits
-
-        roots = []
-        all_initial_actions = []
-        gumbels = []
-        all_games = []
-        all_histories = []
-        for idx in range(len(base_games)):
-
-            if dones[idx]:
-                continue
-
-            root = Node(0)
-            expand_node(
-                root,
-                base_games[idx].agent_selection,
-                action_masks[idx],
-                logits=n_logits[idx],
-            )
-
-            # after we expanded the root we select the initial n actions
-            legal_actions = np.array([a for a in root.children.keys()])
-            gumbel = np.random.gumbel(size=config.action_space_size)
-            top_k_ind = top_k_actions(
-                config,
-                root,
-                legal_actions,
-                gumbel,
-                config.num_sampled_actions,
-            )
-            initial_actions = legal_actions[top_k_ind]
-
-            roots.append(root)
-            all_initial_actions.append(initial_actions)
-            gumbels.append(gumbel)
-            all_games.append(base_games[idx])
-            all_histories.append(histories[idx])
-
-        actions = run_sequential_halving(
-            config,
-            network,
-            roots,
-            all_initial_actions,
-            all_games,
-            gumbels,
-        )
-
-        assert len(all_games) == len(actions) == len(roots) == len(states)
-        for idx, action in enumerate(actions):
-            all_games[idx].step(action)
-
-            stats = {}
-            for a, c_node in roots[idx].children.items():
-                stats[a] = float(
-                    c_node.value
-                    if c_node.visit_count >= 1
-                    else roots[idx].value
+        if not np.all(dones):
+            valid_indices = (~dones).nonzero()[0]
+            states = [states[idx] for idx in valid_indices]
+            state = np.stack(states, 0)
+            state = (
+                torch.from_numpy(state)
+                .permute(0, 3, 1, 2)
+                .to(
+                    device=network_config.device,
+                    memory_format=torch.channels_last if network_config.channels_last else torch.contiguous_format,
+                    dtype=torch.float16 if network_config.half else torch.float32,
                 )
-            all_histories[idx].store_statistics(
-                action,
-                root_value=roots[idx].value,
-                stats=stats,
-                state=states[idx],
             )
+            logits = network(state)[0].cpu().numpy()
+
+            n_logits = np.zeros((config.self_play_batch_size, logits.shape[1]))
+            n_logits[valid_indices] = logits
+
+            roots = []
+            all_initial_actions = []
+            gumbels = []
+            all_games = []
+            all_histories = []
+            for idx in range(len(base_games)):
+                if dones[idx]:
+                    continue
+
+                root = Node(0)
+                expand_node(
+                    root,
+                    base_games[idx].agent_selection,
+                    action_masks[idx],
+                    logits=n_logits[idx],
+                )
+
+                # after we expanded the root we select the initial n actions
+                legal_actions = np.array([a for a in root.children.keys()])
+                gumbel = np.random.gumbel(size=config.action_space_size)
+                top_k_ind = top_k_actions(
+                    config,
+                    root,
+                    legal_actions,
+                    gumbel,
+                    config.num_sampled_actions,
+                )
+                initial_actions = legal_actions[top_k_ind]
+
+                roots.append(root)
+                all_initial_actions.append(initial_actions)
+                gumbels.append(gumbel)
+                all_games.append(base_games[idx])
+                all_histories.append(histories[idx])
+
+            actions = run_sequential_halving(
+                config,
+                network_config,
+                network,
+                roots,
+                all_initial_actions,
+                all_games,
+                gumbels,
+            )
+
+            assert len(all_games) == len(actions) == len(roots) == len(states)
+
+            for idx, action in enumerate(actions):
+                all_games[idx].step(action)
+
+                stats = {}
+                for a, c_node in roots[idx].children.items():
+                    stats[a] = float(
+                        c_node.value if c_node.visit_count >= 1 else roots[idx].value
+                    )
+                all_histories[idx].store_statistics(
+                    action,
+                    root_value=roots[idx].value,
+                    stats=stats,
+                    state=states[idx],
+                )
 
     for history, game in zip(histories, base_games):
         history.outcome = game._cumulative_rewards
         history.consolidate()
+    torch.cuda.empty_cache()
     return histories
 
 
 def run_sequential_halving(
     config: AlphaZeroConfig,
+    network_config: NetworkConfig,
     network: PredictionNetwork,
     roots: List[Node],
     actions: List[np.ndarray],
@@ -179,15 +179,12 @@ def run_sequential_halving(
     # we get n actions and we want to reduce the number of actions in half for each step
     num_games = len(base_games)
 
-    initial_num_actions = [
-        min(len(acs), config.num_sampled_actions) for acs in actions
-    ]
+    initial_num_actions = [min(len(acs), config.num_sampled_actions) for acs in actions]
     curr_num_actions = initial_num_actions.copy()
 
     num_performed_sims = np.zeros(num_games)
     num_phases = [
-        math.ceil(math.log2(num_actions))
-        for num_actions in initial_num_actions
+        math.ceil(math.log2(num_actions)) for num_actions in initial_num_actions
     ]
 
     for phase in range(max(num_phases)):
@@ -202,21 +199,14 @@ def run_sequential_halving(
                 int(
                     (config.num_simulations - num_sims) // num_actions
                     if is_last_p
-                    else (
-                        config.num_simulations
-                        // max(num_phase * num_actions, 1)
-                    )
+                    else (config.num_simulations // max(num_phase * num_actions, 1))
                 )
             )
 
         for sim_idx in range(max(max_num_sims)):
-            states = np.zeros(
-                (num_games, max(curr_num_actions), 8, 8, 111), dtype=bool
-            )
+            states = np.zeros((num_games, max(curr_num_actions), 8, 8, 111), dtype=bool)
             dones = np.zeros((num_games, max(curr_num_actions)), dtype=bool)
-            valid_steps = np.zeros(
-                (num_games, max(curr_num_actions)), dtype=bool
-            )
+            valid_steps = np.zeros((num_games, max(curr_num_actions)), dtype=bool)
             action_masks_2d = np.zeros(
                 (num_games, max(curr_num_actions), config.action_space_size),
                 dtype=bool,
@@ -251,8 +241,8 @@ def run_sequential_halving(
                     # run network on leaf node
                     obs, _, term, trunc, _ = game.last()
 
-                    states[game_idx, action_idx] = obs['observation']
-                    action_masks_2d[game_idx, action_idx] = obs['action_mask']
+                    states[game_idx, action_idx] = obs["observation"]
+                    action_masks_2d[game_idx, action_idx] = obs["action_mask"]
                     dones[game_idx, action_idx] = term or trunc
                     valid_steps[game_idx, action_idx] = True
 
@@ -270,9 +260,7 @@ def run_sequential_halving(
                 valid_steps.flatten(), np.logical_not(dones.flatten())
             ).nonzero()[0]
 
-            states = states.reshape(
-                (num_games * max(curr_num_actions), 8, 8, 111)
-            )
+            states = states.reshape((num_games * max(curr_num_actions), 8, 8, 111))
 
             n_values = np.zeros(states.shape[0])
             n_logits = np.zeros((states.shape[0], config.action_space_size))
@@ -283,9 +271,9 @@ def run_sequential_halving(
                     torch.from_numpy(valid_states)
                     .permute(0, 3, 1, 2)
                     .to(
-                        device=DEVICE,
-                        memory_format=torch.channels_last,
-                        dtype=torch.float16,
+                        device=network_config.device,
+                        memory_format=torch.channels_last if network_config.channels_last else torch.contiguous_format,
+                        dtype=torch.float16 if network_config.half else torch.float32,
                     )
                 )
                 logits, values = network(state)
@@ -307,13 +295,13 @@ def run_sequential_halving(
                     continue
                 for action_idx in range(len(search_paths_2d[game_idx])):
                     if dones[game_idx, action_idx]:
-                        value = int(
+                        value = float(
                             outcomes_2d[game_idx][action_idx][
                                 players_2d[game_idx][action_idx]
                             ]
                         )
                     else:
-                        value = int(n_values[game_idx, action_idx])
+                        value = float(n_values[game_idx, action_idx])
 
                     if (not dones[game_idx, action_idx]) and valid_steps[
                         game_idx, action_idx
@@ -329,8 +317,7 @@ def run_sequential_halving(
                             s_node.visit_count += 1
                             s_node.value_sum += float(
                                 value
-                                if s_node.cur_player
-                                == players_2d[game_idx][action_idx]
+                                if s_node.cur_player == players_2d[game_idx][action_idx]
                                 else -value
                             )
                 num_performed_sims[game_idx] += curr_num_actions[game_idx]
