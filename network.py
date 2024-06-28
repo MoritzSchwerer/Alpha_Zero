@@ -116,6 +116,7 @@ class PredictionNetwork(nn.Module):
                 in_channels=self.interm_channels,
                 out_channels=self.interm_channels,
                 kernel_size=1,
+                bias=not self.use_bn,
             ),
             nn.BatchNorm2d(self.interm_channels) if self.use_bn else nn.Identity(),
             nn.ReLU(),
@@ -165,6 +166,7 @@ class NetworkStorage:
 
         net = PredictionNetwork(self.network_config)
         if len(files) != 0:
+            print("Loading: ", str(files[-1]))
             state_dict = torch.load(files[-1])
             net.load_state_dict(state_dict)
 
