@@ -170,7 +170,7 @@ class NetworkStorage:
             state_dict = torch.load(files[-1])
             net.load_state_dict(state_dict)
 
-        if self.network_config.half:
+        if not train and self.network_config.half:
             net = net.half()
 
         net = net.to(
