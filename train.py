@@ -4,6 +4,8 @@ import concurrent.futures
 import multiprocessing as mp
 import time
 
+
+from torch.amp import autocast
 from config import AlphaZeroConfig
 from storage import ReplayBuffer
 from gumbel_alpha_zero import play_game
@@ -100,37 +102,38 @@ class Trainer:
             total_time_sample += (time.time_ns()-start_time)
 
             state, value_target, policy_target = data
-            value_target = torch.from_numpy(value_target).to(device='cuda:0')
-            policy_target = torch.from_numpy(policy_target).to(device='cuda:0')
+            value_target = torch.from_numpy(value_target).to(device='cuda')
+            policy_target = torch.from_numpy(policy_target).to(device='cuda')
             state = (
                 torch.from_numpy(state)
                 .reshape(-1, 8, 8, 111)
                 .permute(0, 3, 1, 2)
                 .to(
-                    device='cuda:0',
+                    device='cuda',
                     memory_format=torch.channels_last,
                     dtype=torch.float16,
                 )
             )
             start_time = time.time_ns()
-            policy_pred, value_pred = network(state)
+            with autocast(device_type='cuda'):
+                policy_pred, value_pred = network(state)
+                policy_pred = torch.log_softmax(policy_pred, 1)
+                imp_policy_target = torch.log_softmax(policy_pred.detach() + transform(policy_target), 1)
 
-            policy_pred = torch.log_softmax(policy_pred, 1)
-            imp_policy_target = torch.log_softmax(policy_pred.detach() + transform(policy_target), 1)
+                value_loss = (value_target - value_pred.view(-1)).pow(2).mean(0)
+                policy_loss = F.kl_div(policy_pred, imp_policy_target, reduction='batchmean', log_target=True)
 
-            value_loss = (value_target - value_pred.view(-1)).pow(2).mean(0)
-            policy_loss = F.kl_div(policy_pred, imp_policy_target, reduction='batchmean', log_target=True)
-
-            loss = self.beta_value * value_loss + policy_loss
+                loss = self.beta_value * value_loss + policy_loss
 
             optim.zero_grad()
             loss.backward()
             optim.step()
-            print((time.time_ns()-start_time) / 1e6)
+
             total_time_network += (time.time_ns()-start_time)
             sample_time = int(total_time_sample / (i+1) / 1e6)
             network_time = int(total_time_network / (i+1) / 1e6) 
-            pbar.set_postfix({'sample': sample_time, 'network': network_time})
+            losses = (str(round(value_loss.item(), 3)).ljust(5), str(round(policy_loss.item(), 3)).ljust(5))
+            pbar.set_postfix({'sample': sample_time, 'losses': losses})
             pbar.update(1)
 
         self.network_storage.save_network(network)
