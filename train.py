@@ -111,7 +111,7 @@ class Trainer:
                 .to(
                     device='cuda',
                     memory_format=torch.channels_last,
-                    dtype=torch.float16,
+                    dtype=torch.float32,
                 )
             )
             start_time = time.time_ns()
@@ -120,14 +120,15 @@ class Trainer:
                 policy_pred = torch.log_softmax(policy_pred, 1)
                 imp_policy_target = torch.log_softmax(policy_pred.detach() + transform(policy_target), 1)
 
-                value_loss = (value_target - value_pred.view(-1)).pow(2).mean(0)
+                value_loss = F.mse_loss(value_pred.view(-1), value_target)
                 policy_loss = F.kl_div(policy_pred, imp_policy_target, reduction='batchmean', log_target=True)
 
-                loss = self.beta_value * value_loss + policy_loss
+                loss = (value_loss + policy_loss)
 
             optim.zero_grad()
             loss.backward()
             optim.step()
+
 
             total_time_network += (time.time_ns()-start_time)
             sample_time = int(total_time_sample / (i+1) / 1e6)

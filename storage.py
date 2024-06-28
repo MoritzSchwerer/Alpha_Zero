@@ -200,7 +200,7 @@ def _sample_single(file: str, example_games, total_num_actions=4672):
         players = lengths % 2
         outcomes = [f["outcomes"][game_idx] for game_idx in example_games]
         outcomes = np.array(
-            [outcomes[i][p] for i, p in enumerate(players)], dtype=np.int64
+            [outcomes[i][p] for i, p in enumerate(players)], dtype=np.float32
         )
         # print(f"Outcomes takes: {int((time.time_ns()-start)/1e6)} ms")
 
