@@ -9,16 +9,17 @@ def main():
     hdf5_config = HDF5Config(game_length=game_length)
     replay_buffer = ReplayBuffer(
         hdf5_config,
-        # base_dir='./replay_buffer/',
-        base_dir='/tmp/replay_buffer/',
-        base_name=f'first_run_l{game_length}'
+        base_dir='./replay_buffer/',
+        # base_dir='/tmp/replay_buffer/',
+        base_name=f'second_run_l{game_length}'
     )
 
     network_config = NetworkConfig(interm_channels=128, num_blocks=19, use_bn=True)
     network_storage = NetworkStorage(
         network_config,
-        # dir='./networks'
-        dir='/tmp/networks/'
+        dir='./networks',
+        # dir='/tmp/networks/',
+        prefix=f'second_run_l{game_length}'
     )
 
     config = AlphaZeroConfig(
@@ -30,10 +31,11 @@ def main():
     trainer = Trainer(
         config,
         replay_buffer=replay_buffer,
-        network_storage=network_storage
+        network_storage=network_storage,
+        lr=0.2,
     )
 
-    trainer.run(num_cycles=1, train_first=False)
+    trainer.run(num_cycles=2, train_first=False)
     print(f"Number of games generated: {trainer.replay_buffer.current_size}")
 
 
