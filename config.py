@@ -4,6 +4,7 @@ class AlphaZeroConfig:
         max_num_threads: int = 8,
         num_processes:int = 40,
         game_length: int = 100,
+        batch_size: int = 4096,
     ):
 
         self.self_play_batch_size = self_play_batch_size
@@ -26,7 +27,7 @@ class AlphaZeroConfig:
         self.pb_c_init = 1.25
 
         # training
-        self.batch_size = 4096
+        self.batch_size = batch_size
 
         # other
         self.num_simulations = 2
