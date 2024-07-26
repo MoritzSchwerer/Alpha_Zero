@@ -1,12 +1,11 @@
 class AlphaZeroConfig:
-    def __init__(self,
+    def __init__(
+        self,
         self_play_batch_size: int = 128,
         max_num_threads: int = 8,
-        num_processes:int = 40,
+        num_processes: int = 40,
         game_length: int = 100,
-        batch_size: int = 4096,
     ):
-
         self.self_play_batch_size = self_play_batch_size
         self.max_num_threads = max_num_threads
         self.num_processes = num_processes
@@ -25,9 +24,6 @@ class AlphaZeroConfig:
         self.dirichlet_alpha = 0.3
         self.pb_c_base = 19652
         self.pb_c_init = 1.25
-
-        # training
-        self.batch_size = batch_size
 
         # other
         self.num_simulations = 2

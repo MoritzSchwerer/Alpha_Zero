@@ -63,7 +63,7 @@ class GameHistory:
             self.states = np.stack(self.states, 0).astype(bool)
 
     def sample_position(self) -> int:
-        assert self.consolidated, 'Object needs to be consolidated first'
+        assert self.consolidated, "Object needs to be consolidated first"
         move_index = random.randint(0, len(self) - 1)
         return move_index
 
@@ -78,8 +78,8 @@ class GameHistory:
 
     def cur_player(self, move_index: int) -> str:
         if move_index % 2 == 0:
-            return 'player_0'
-        return 'player_1'
+            return "player_0"
+        return "player_1"
 
     def get_targets(self, move_index: int) -> Tuple[np.ndarray, int]:
         return (

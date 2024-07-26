@@ -3,15 +3,15 @@ import torch
 import math
 import copy
 
-from typing import List
+from typing import List, Any
 
-from network import PredictionNetwork, NetworkConfig
+from network import PredictionNetworkV2, NetworkConfig, categorical_to_float
 from game import GameHistory, new_game, Chess
 from config import AlphaZeroConfig
 from mcts import Node, expand_node
 
 DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
-torch.set_float32_matmul_precision = "medium"
+torch.set_float32_matmul_precision("medium")
 
 
 def top_k_actions(
@@ -54,15 +54,16 @@ def select_child(config: AlphaZeroConfig, node: Node):
     return action, node.children[action]
 
 
-@torch.no_grad
+@torch.no_grad()
 def play_game(
-    config: AlphaZeroConfig, network_config: NetworkConfig, network: PredictionNetwork
+    config: AlphaZeroConfig, network_config: NetworkConfig, network: PredictionNetworkV2
 ):
     base_games = [new_game() for _ in range(config.self_play_batch_size)]
     histories = [GameHistory() for _ in range(config.self_play_batch_size)]
+    # network = torch.compile(network, mode="max-autotune")
 
     # curr_batch_size = config.self_play_batch_size
-    for _ in range(config.max_moves):
+    for move_idx in range(config.max_moves):
         states = [None] * config.self_play_batch_size
         action_masks = [None] * config.self_play_batch_size
         dones = np.zeros(config.self_play_batch_size, dtype=bool)
@@ -78,21 +79,32 @@ def play_game(
 
         if not np.all(dones):
             valid_indices = (~dones).nonzero()[0]
-            states = [states[idx] for idx in valid_indices]
+            states: List[Any] = [states[idx] for idx in valid_indices]
             state = np.stack(states, 0)
             state = (
                 torch.from_numpy(state)
                 .permute(0, 3, 1, 2)
                 .to(
                     device=network_config.device,
-                    memory_format=torch.channels_last if network_config.channels_last else torch.contiguous_format,
+                    memory_format=torch.channels_last
+                    if network_config.channels_last
+                    else torch.contiguous_format,
                     dtype=torch.float16 if network_config.half else torch.float32,
                 )
             )
-            logits = network(state)[0].cpu().numpy()
+            logits, values = network(state)
+            if torch.any(torch.isnan(logits)) or torch.any(torch.isnan(values)):
+                raise ValueError("Got nans in network output.")
+            values = categorical_to_float(values)
+            logits = logits.cpu().numpy()
+            values = values.cpu().flatten().numpy()
 
-            n_logits = np.zeros((config.self_play_batch_size, logits.shape[1]))
+            n_logits = np.zeros(
+                (config.self_play_batch_size, logits.shape[1]), dtype=np.float32
+            )
             n_logits[valid_indices] = logits
+            n_values = np.zeros(config.self_play_batch_size, dtype=np.float32)
+            n_values[valid_indices] = values
 
             roots = []
             all_initial_actions = []
@@ -103,13 +115,15 @@ def play_game(
                 if dones[idx]:
                     continue
 
-                root = Node(0)
+                root = Node(0, 0)
                 expand_node(
                     root,
                     base_games[idx].agent_selection,
                     action_masks[idx],
                     logits=n_logits[idx],
                 )
+                root.visit_count += 1
+                root.value_sum += float(n_values[idx])
 
                 # after we expanded the root we select the initial n actions
                 legal_actions = np.array([a for a in root.children.keys()])
@@ -128,7 +142,6 @@ def play_game(
                 gumbels.append(gumbel)
                 all_games.append(base_games[idx])
                 all_histories.append(histories[idx])
-
             actions = run_sequential_halving(
                 config,
                 network_config,
@@ -139,19 +152,28 @@ def play_game(
                 gumbels,
             )
 
+            # sometimes there is a one element array in this list which crashes the program
+            actions = [int(a) for a in actions]
+
             assert len(all_games) == len(actions) == len(roots) == len(states)
 
             for idx, action in enumerate(actions):
                 all_games[idx].step(action)
 
                 stats = {}
-                for a, c_node in roots[idx].children.items():
-                    stats[a] = float(
-                        c_node.value if c_node.visit_count >= 1 else roots[idx].value
-                    )
+                if roots[idx].visit_count > 1:
+                    value = _calc_mix_value(roots[idx])
+
+                    for a, c_node in roots[idx].children.items():
+                        stats[a] = float(
+                            c_node.value if c_node.visit_count >= 1 else value
+                        )
+                else:
+                    stats[action] = roots[idx].value
+
                 all_histories[idx].store_statistics(
                     action,
-                    root_value=roots[idx].value,
+                    root_value=float(value),
                     stats=stats,
                     state=states[idx],
                 )
@@ -166,7 +188,7 @@ def play_game(
 def run_sequential_halving(
     config: AlphaZeroConfig,
     network_config: NetworkConfig,
-    network: PredictionNetwork,
+    network: PredictionNetworkV2,
     roots: List[Node],
     actions: List[np.ndarray],
     base_games: List[Chess],
@@ -225,6 +247,7 @@ def run_sequential_halving(
                 outcomes = [None] * curr_num_actions[game_idx]
                 for action_idx, r_action in enumerate(actions[game_idx]):
                     if action_idx >= curr_num_actions[game_idx]:
+                        print("I think this should never get hit")
                         break
                     game = copy.deepcopy(base_games[game_idx])
                     game.step(r_action)
@@ -272,11 +295,14 @@ def run_sequential_halving(
                     .permute(0, 3, 1, 2)
                     .to(
                         device=network_config.device,
-                        memory_format=torch.channels_last if network_config.channels_last else torch.contiguous_format,
+                        memory_format=torch.channels_last
+                        if network_config.channels_last
+                        else torch.contiguous_format,
                         dtype=torch.float16 if network_config.half else torch.float32,
                     )
                 )
                 logits, values = network(state)
+                values = categorical_to_float(values)
                 logits, values = (
                     logits.cpu().numpy(),
                     values.cpu().flatten().numpy(),
@@ -337,3 +363,31 @@ def run_sequential_halving(
             actions[game_idx] = actions[game_idx][top_k_ind]
 
     return actions
+
+
+def _calc_mix_value(root: Node):
+    """
+    calculate mix value here see
+    https://openreview.net/forum?id=bERaNdoegnO eq. 33
+    """
+    chosen_action_stats = []
+    for action, child in root.children.items():
+        if child.visit_count > 0:
+            chosen_action_stats.append((action, child))
+
+    # simplified algorithm
+    value = 0.0
+    logit_sum = 0.0
+    for _, c in chosen_action_stats:
+        value += c.value * c.logit
+        logit_sum += c.logit
+    value /= logit_sum + 1e-5
+    value += root.value / root.visit_count
+
+    # weighted_priors = sum(c.visit_count * c.prior for _, c in chosen_action_stats)
+    # weight = root.visit_count / weighted_priors
+    # value_mix = sum(c.prior * c.value for _, c in chosen_action_stats)
+    # unscaled_value_approx = root.value + weight * value_mix
+    # scale = 1 / (root.visit_count + 1)
+    # value = scale * unscaled_value_approx
+    return value

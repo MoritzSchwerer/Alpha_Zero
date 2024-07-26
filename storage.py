@@ -35,6 +35,7 @@ class ReplayBuffer:
         base_name="rb",
         num_sample_files: int = 4,
         total_num_actions: int = 4672,
+        batch_size: int = 4096,
     ):
         self.base_dir = base_dir
         self.base_name = base_name
@@ -44,11 +45,12 @@ class ReplayBuffer:
         self.current_files: Deque[str] = deque(maxlen=self.config.num_files)
         self.current_size = 0
         self.created = False
+        self.batch_size = batch_size
 
         if not os.path.exists(self.base_dir):
             os.mkdir(self.base_dir)
         num_files = len(list(Path(self.base_dir).glob(f"{self.base_name}*.h5")))
-        self.new_file_name = FileNamer(base=self.base_name, start_count=num_files+1)
+        self.new_file_name = FileNamer(base=self.base_name, start_count=num_files + 1)
 
     def init_from_dataset(self) -> bool:
         """
@@ -63,7 +65,7 @@ class ReplayBuffer:
         )
         if len(files) > 0:
             self.current_files.extend(files)
-            self.current_size = (len(files) - 1) * self.config.file_size
+            self.current_size = (len(self.current_files) - 1) * self.config.file_size
             lengths = _read_lengths(self.current_files[-1])
             assert lengths.shape[0] == self.config.file_size
             non_zero = lengths.nonzero()[0]
@@ -110,7 +112,6 @@ class ReplayBuffer:
         )
         self.current_size += len(data)
 
-
     def sample_examples(self, batch_size=4096):
         assert self.created, "Must create_dataset or init_from_dir first"
 
@@ -128,7 +129,9 @@ class ReplayBuffer:
                 self.config.file_size, size=num_elems, replace=False
             )
             example_games = np.sort(example_games)
-            states, outcomes, action_values = _sample_single(file, example_games, self.total_num_actions)
+            states, outcomes, action_values = _sample_single(
+                file, example_games, self.total_num_actions
+            )
             states_list.append(states)
             outcomes_list.append(outcomes)
             action_values_list.append(action_values)
@@ -138,6 +141,12 @@ class ReplayBuffer:
         action_values = np.concatenate(action_values_list, 0)
 
         return states, outcomes, action_values
+
+    def __getitem__(self, _):
+        return self.sample_examples(batch_size=self.batch_size)
+
+    def __len__(self):
+        return self.current_size
 
 
 def _read_lengths(file_name: str):
@@ -150,59 +159,50 @@ def _sample_single(file: str, example_games, total_num_actions=4672):
     states = np.zeros((len(example_games), 7104), dtype=np.bool_)
     lengths = np.zeros((len(example_games)), dtype=np.int32)
     with h5py.File(file, "r") as f:
-        # start = time.time_ns()
         for dest_idx, game_idx in enumerate(example_games):
             f["lengths"].read_direct(
                 lengths,
                 source_sel=np.s_[game_idx],
                 dest_sel=np.s_[dest_idx],
             )
-        # print("="*88)
-        # print(f"Length takes: {int((time.time_ns()-start)/1e6)} ms")
-        # start = time.time_ns()
         move_indices = np.zeros(len(lengths), dtype=np.int32)
         for i, length in enumerate(lengths):
             move_indices[i] = np.random.randint(0, length, size=None)
-        # print(f"Moves takes: {int((time.time_ns()-start)/1e6)} ms")
 
-        # start = time.time_ns()
         for i, (game_idx, move_idx) in enumerate(zip(example_games, move_indices)):
             f["states"].read_direct(
                 states,
                 source_sel=np.s_[game_idx, move_idx, :],
                 dest_sel=np.s_[i, :],
             )
-        # print(f"State takes: {int((time.time_ns()-start)/1e6)} ms")
 
-        root_values = np.zeros(len(example_games), dtype=np.float32)
-        for dest_idx, (game_idx, move_idx) in enumerate(zip(example_games, move_indices)):
-            f["root_values"].read_direct(
-                root_values,
-                source_sel=np.s_[game_idx, move_idx],
-                dest_sel=np.s_[dest_idx],
-            )
+        # root_values = np.zeros(len(example_games), dtype=np.float32)
+        # for dest_idx, (game_idx, move_idx) in enumerate(
+        #     zip(example_games, move_indices)
+        # ):
+        #     f["root_values"].read_direct(
+        #         root_values,
+        #         source_sel=np.s_[game_idx, move_idx],
+        #         dest_sel=np.s_[dest_idx],
+        #     )
 
-        # start = time.time_ns()
+        action_values = np.full(
+            (len(example_games), total_num_actions),
+            np.finfo(np.float32).min,
+            dtype=np.float32,
+        )
         avs = [
             f["action_values"][game_idx, move_idx]
             for game_idx, move_idx in zip(example_games, move_indices)
         ]
-        # print(f"Action-Values access takes: {int((time.time_ns()-start)/1e6)} ms")
-        # start = time.time_ns()
-        # avs_arr = np.full((len(avs), 4672), root_values[], dtype=np.float32)
-        action_values = np.broadcast_to(root_values.reshape(-1, 1), (len(root_values), total_num_actions)).copy()
         for i, av in enumerate(avs):
             for a, v in av:
                 action_values[i, a] = v
-        # print(f"Action-Values policy construction takes: {int((time.time_ns()-start)/1e6)} ms")
-
-        # start = time.time_ns()
-        players = lengths % 2
+        players = move_indices % 2
         outcomes = [f["outcomes"][game_idx] for game_idx in example_games]
         outcomes = np.array(
             [outcomes[i][p] for i, p in enumerate(players)], dtype=np.float32
         )
-        # print(f"Outcomes takes: {int((time.time_ns()-start)/1e6)} ms")
 
     return states, outcomes, action_values
 
@@ -252,7 +252,8 @@ def _append_dataset(
     data_length = len(data)
     actions, states, root_values, lengths = _preprocess_data(data, game_length)
 
-    dict_dt = np.dtype([("key", np.int32), ("value", np.float32)])
+    # NOTE: maybe go to 16 bits here
+    dict_dt = np.dtype([("key", np.int16), ("value", np.float16)])
     with h5py.File(file_name, "a") as f:
         f["actions"][start_idx : start_idx + data_length] = actions
         f["states"][start_idx : start_idx + data_length] = states
@@ -285,7 +286,7 @@ def _create_dataset(
     compression: Optional["str"] = None,
 ):
     with h5py.File(file_name, "w") as f:
-        dict_dt = np.dtype([("key", np.int32), ("value", np.float32)])
+        dict_dt = np.dtype([("key", np.int16), ("value", np.float16)])
         outcome_dt = np.dtype([("player_0", np.int32), ("player_1", np.int32)])
         f.create_dataset(
             "actions",
@@ -328,7 +329,9 @@ def _create_dataset(
 
 
 class FileNamer:
-    def __init__(self, base: str, fill_length: int = 4, ext: str = ".h5", start_count: int = 1):
+    def __init__(
+        self, base: str, fill_length: int = 4, ext: str = ".h5", start_count: int = 1
+    ):
         self.base = base
         self.count = start_count
         self.fill_length = fill_length

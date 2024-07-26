@@ -7,13 +7,13 @@ import time
 from typing import Tuple, List, Any
 from tqdm import tqdm
 
-from network import PredictionNetwork
+from network import PredictionNetworkV2
 from game import GameHistory, new_game
 from config import AlphaZeroConfig
 from mcts import Node, expand_node
 
-DEVICE = 'cuda:0' if torch.cuda.is_available() else 'cpu'
-torch.set_float32_matmul_precision = 'medium'
+DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
+torch.set_float32_matmul_precision = "medium"
 
 
 def add_exploration_noise(config: AlphaZeroConfig, node: Node):
@@ -38,16 +38,13 @@ def softmax_sample(dist: List[Tuple[int, int]], temp: float):
 
 
 def select_action(config, num_moves: int, node: Node):
-    visits = [
-        (child.visit_count, action) for action, child in node.children.items()
-    ]
+    visits = [(child.visit_count, action) for action, child in node.children.items()]
     temperature = config.softmax_temperature_fn(num_moves=num_moves)
     action = softmax_sample(visits, temperature)
     return action
 
 
 def select_child(config: AlphaZeroConfig, node: Node):
-
     _, action, child = max(
         (ucb_score(config, node, child), action, child)
         for action, child in node.children.items()
@@ -57,9 +54,7 @@ def select_child(config: AlphaZeroConfig, node: Node):
 
 def ucb_score(config: AlphaZeroConfig, parent: Node, child: Node) -> float:
     pb_c = (
-        math.log(
-            (parent.visit_count + config.pb_c_base + 1) / config.pb_c_base
-        )
+        math.log((parent.visit_count + config.pb_c_base + 1) / config.pb_c_base)
         + config.pb_c_init
     )
 
@@ -78,13 +73,13 @@ def extract_visit_counts(config: AlphaZeroConfig, root: Node):
         visit_counts[action] = node.visit_count
     assert (
         np.sum(visit_counts) == root.visit_count
-    ), f'Got {np.sum(visit_counts)} and {root.visit_count}'
+    ), f"Got {np.sum(visit_counts)} and {root.visit_count}"
     return visit_counts
 
 
 def run_mcts(
     config: AlphaZeroConfig,
-    network: PredictionNetwork,
+    network: PredictionNetworkV2,
     roots: List[Node],
     base_games: List[Any],
 ):
@@ -108,20 +103,16 @@ def run_mcts(
                 games[idx].step(action)
 
             obs, _, term, trunc, _ = games[idx].last()
-            states[idx] = obs['observation']
-            action_masks[idx] = obs['action_mask']
+            states[idx] = obs["observation"]
+            action_masks[idx] = obs["action_mask"]
             dones[idx] = term or trunc
 
         n_values = np.zeros(config.self_play_batch_size)
-        n_logits = np.zeros(
-            (config.self_play_batch_size, config.action_space_size)
-        )
+        n_logits = np.zeros((config.self_play_batch_size, config.action_space_size))
         if sum(dones) < config.self_play_batch_size:
             valid_indices = (~dones).nonzero()[0]
 
-            state = np.stack(
-                [s for i, s in enumerate(states) if i in valid_indices], 0
-            )
+            state = np.stack([s for i, s in enumerate(states) if i in valid_indices], 0)
             state = (
                 torch.from_numpy(state)
                 .permute(0, 3, 1, 2)
@@ -155,29 +146,24 @@ def run_mcts(
             for node in search_paths[idx]:
                 node.visit_count += 1
                 node.value_sum += float(
-                    n_values[idx]
-                    if node.cur_player == cur_player
-                    else -n_values[idx]
+                    n_values[idx] if node.cur_player == cur_player else -n_values[idx]
                 )
 
 
 @torch.no_grad
 def play_game(
-    config: AlphaZeroConfig, network: PredictionNetwork
+    config: AlphaZeroConfig, network: PredictionNetworkV2
 ) -> List[GameHistory]:
     # game_time = 0
     if torch.cuda.is_available() and torch.backends.cudnn.version() >= 7603:
-        network = network.to(
-            device=DEVICE, memory_format=torch.channels_last
-        ).half()
+        network = network.to(device=DEVICE, memory_format=torch.channels_last).half()
 
     # start_game = time.time_ns()
     games = [new_game() for _ in range(config.self_play_batch_size)]
     # game_time += time.time_ns() - start_game
 
     histories = [
-        GameHistory(config.new_game)
-        for _ in range(config.self_play_batch_size)
+        GameHistory(config.new_game) for _ in range(config.self_play_batch_size)
     ]
     dones = [False] * config.self_play_batch_size
     states = [None] * config.self_play_batch_size
@@ -190,8 +176,8 @@ def play_game(
                 continue
             obs, _, term, trunc, _ = game.last()
             dones[idx] = term or trunc
-            states[idx] = obs['observation']
-            action_masks[idx] = obs['action_mask']
+            states[idx] = obs["observation"]
+            action_masks[idx] = obs["action_mask"]
         # game_time += time.time_ns() - start_game
 
         if np.all(dones):
@@ -225,7 +211,7 @@ def play_game(
 
         start = time.time_ns()
         run_mcts(config, network, roots, games)
-        print('mcts took: ', (time.time_ns() - start) // 1e6, ' seconds')
+        print("mcts took: ", (time.time_ns() - start) // 1e6, " seconds")
         for idx in range(config.self_play_batch_size):
             if dones[idx]:
                 continue
