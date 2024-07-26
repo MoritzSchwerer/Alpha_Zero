@@ -8,22 +8,21 @@ configuration as well as with the later introduced Gumbel Search.
 This implementation currently uses the Pettingzoo chess environment,
 which is nice to work with, but unfortunatelly seems to be the bottleneck
 at least on my machine. 
-My aim is to write a fast chess library in C++ and create python bindings
-for it, to speed up the self play part of the algorithm significantly.
+
+
+This repo implements Gumbel Search from this [paper](https://openreview.net/forum?id=bERaNdoegnO).
+The code can be read in `gumbel_alpha_zero.py` but unfortunatelly to make the code 
+as fast as possible I had to sacrifice readability. So I would not recommend trying to
+read the code there, since it implements a batched version of the algorithm so that
+the gpu would be used more effectively.
+
+
+I developed my own C++ Chess Environment which is supposed to be a drop in
+replacement for [Pettingzoo](https://pettingzoo.farama.org/environments/classic/chess/),
+which will allow me to train a lot more effectively and hopefully reach
+a high level of performance with limited resources. As of today I have not
+incorporated this my own Chess Environment but it is on top of my list.
+
 At that point I expect the DNN to be the bottleneck, which will lead to
 interesting experiments in that regard.
 
-
-### Notes for me:
-
-AlphaZero uses a batch size of 4096 and it is trained for 700k step,
-meaning it sees ~2.8B samples. At 44M games that means if each game
-has the same weight, it will be seen roughly 65 times by the network.
-This would equate to having a replay_buffer of 1M games, training on
-3M samples out of the 1M games, then replacing the oldest 50K games
-by new self play games and repeat...
-
-With the random network in the beginning we want to run 300 - 500 steps
-per game before terminating.
-Later on the games might not last that many steps so we can probably cut
-that number down over time.
